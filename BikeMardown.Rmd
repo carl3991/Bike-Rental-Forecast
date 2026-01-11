@@ -1,0 +1,580 @@
+---
+title: "Forecasting Daily Bike Rental Demand"
+author: "Carl Legros"
+date: "`r Sys.Date()`"
+output: html_document
+   
+---
+
+<br></br>
+```{r image, echo=FALSE, warning=FALSE, fig.asp= 0.6,  out.width="90%", fig.align='left'}
+knitr:: include_graphics("Rental-Bikes-1.jpeg") 
+```
+<br> </br>
+
+
+<style> 
+body{background: linear-gradient(120deg, #0f0c29, #302b63, #24243e);
+color:white; padding:20px; font-family: "Helvetica Neue", Arial, sans-serif;
+font-size:17px;
+}
+</style>
+
+
+
+### Analysis Overview
+
+<p style="text-align: justify";>
+This report presents a comprehensive analysis of daily bike rental demand in the Capital Bikeshare system, using data from 2011–2012 to explore patterns and develop time series forecasting models in R. The dataset includes daily rental counts alongside detailed weather and seasonal conditions, offering a rich foundation for understanding how environmental factors influence rider behavior. Across the two‑year period, daily rentals ranged from 22 to 8,714, with a median of 4,548 rides, reflecting a consistently strong demand for shared bicycles in Washington, D.C. </p>
+
+<p style="text-align:justify";> 
+Weather conditions varied substantially and provide important context for modeling demand. Temperatures spanned from 2.4°C to 35.3°C, while apparent temperatures, which reflects how warm or cold it actually feels to people, reached as high as 42°C, likely due to humidity and sun exposure. Humidity ranged from 0% to 97%, typically hovering around 63%, and wind speeds averaged 12 mph. With gusts peaking at 34 mph, wind conditions were sufficient to impact rider comfort and contribute to fluctuations in daily demand. By combining exploratory analysis, summary statistics, and time series modeling, this report aims to identify the key drivers of daily bike rentals and produce reliable forecasts that can support operational planning and resource allocation. </p>
+
+```{r packages, echo=FALSE, message=FALSE, warning=FALSE}
+## Import required packages
+library(ggplot2)
+library(patchwork)
+library(cowplot)
+library(tidyverse)
+library(tidyquant)
+library(dplyr)
+library(timetk)
+library(TTR)
+library(urca)
+library(lubridate)
+library(tseries)
+library(forecast)
+library(lmtest)
+library(tsibble)
+library(zoo)
+```
+
+```{r load dataset, echo=FALSE, warning=FALSE, message=FALSE}
+
+# Loading the data
+bike_df<- read.csv('bikes_rent.csv')
+```
+
+
+```{r clean, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+# Checking for missing values for each column
+colSums(is.na(bike_df))
+
+#Checking for duplicates
+sum(duplicated(bike_df))
+
+# Rename columns
+bike_df<- bike_df %>% 
+  rename(month='mnth', year='yr', temperature='temp', count='cnt',apparent_temp='atemp', humidity='hum')
+
+
+# Converting numeric feature to their meaniful factor names
+bike_df$season <- factor(bike_df$season, 
+                         levels = c(1, 2, 3, 4), 
+                         labels = c("Winter", "Spring", "Summer", "Fall"))
+
+bike_df$year <- factor(bike_df$year, 
+                       levels = c(0, 1), 
+                       labels = c("2011", "2012"))
+
+bike_df$month <- factor(bike_df$month, 
+                        levels = 1:12, 
+                        labels = month.name)  # Built-in month labels
+
+bike_df$holiday <- factor(bike_df$holiday, 
+                          levels = c(0, 1), 
+                          labels = c("No", "Yes"))
+
+bike_df$weekday <- factor(bike_df$weekday, 
+                          levels = 0:6, 
+                          labels = c("Sunday", "Monday", "Tuesday", 
+                                     "Wednesday", "Thursday", "Friday", "Saturday"))
+
+bike_df$workingday <- factor(bike_df$workingday, 
+                             levels = c(0, 1), 
+                             labels = c("No", "Yes"))
+
+bike_df$weathersit <- factor(bike_df$weathersit, 
+                             levels = c(1, 2, 3, 4), 
+                             labels = c("Clear", "Cloudy", 
+                                        "Light Rain/Snow", "Heavy Rain/Snow"))
+```
+
+
+```{r Summary Statistics, echo=FALSE,results='hide',message=FALSE, warning=FALSE}
+
+bike_df %>%
+  select(where(is.numeric)) %>%
+  summary()
+```
+<hr style="border-top:2px groove white;"> </hr>
+
+<br> </br>
+
+### How Weather Conditions Affect Bike Rentals?
+
+```{r weathersit distribution, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE}
+# Bike Rentals: Weathersit Distribution
+ggplot(bike_df, aes(x=weathersit, fill = weathersit)) +
+  geom_bar(color="black") +
+  scale_fill_manual(values = c("Clear" = "skyblue", "Cloudy" = "lightgray", "Light Rain/Snow" = "gray30")) +
+  labs(title = "Bike Rentals by Weather", x="Weather", y="Frequency")+
+  theme_minimal()+
+  theme(plot.title = element_text(hjust=0.5, face="bold"),
+        axis.title.x = element_text(face='bold'),
+        axis.title.y = element_text(face='bold'))
+```
+
+<br></br>
+
+<p style="text-align: justify";>
+Daily bike rental patterns consistently reflect how strongly riders respond to weather conditions. Numerous studies show that clear and pleasant weather produces the highest cycling volumes, while cloudy, rainy, and snowy conditions sharply reduce demand. A large comparative analysis from the ResearchGate study, covering nearly 100 million bikeshare trips across 40 cities, found that ridership consistently declines as weather worsens, with rain and snow producing the steepest drops. This same study found that "generally, precipitation (rain and/or snow) is a deterrent to cycling,” and further highlights important seasonal differences across climate zones: “in cities located in more temperate climates, such as Paris and Brussels, cycling peaks in summer and drops in winter”. </p>
+
+
+<p style="text-align: justify";> 
+Similar findings appeared in a predictive modeling analysis published by the <em> Multidisciplinary Digital Publishing Institute (MDPI)</em>, a Swiss-based publisher of open access scientific journals, which reports that rising temperatures “significantly promote the combined use of shared bikes and subway transportation.” The same study reinforces the pattern shown in the figure above by demonstrating that declines in bike usage during rain and snow are not random fluctuations but predictable behavioral responses. In particular, the authors report that “the relationships between rainfall and wind speed with the shared bikes transfer volume show negative correlations in both cases,” directly mirroring the visual trend in which clear weather yields the highest rentals, cloudy conditions reduce usage, and precipitation produces the steepest drop. </p>
+
+<p style="text-align: justify;">
+To mitigate these weather‑driven declines, the *MDPI* study recommends strengthening physical infrastructure, such as installing covered bike‑share parking near subway stations, to protect riders from adverse conditions. It further calls for real‑time weather alerts, travel‑guidance mechanisms, and intelligent dispatching systems that anticipate demand drops before stormy weather arrives. These studies reinforce the visible pattern in the above plot that riders, by a wide  margin, prefer to bike in clear weather, tolerate cloudy conditions to a lesser extent, and avoid cycling almost entirely during rain or snow. </p>
+
+<br></br>
+
+<br> </br>
+
+### Are Fewer Bikes Rented on Holidays?
+
+```{r seasonal-trend, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE}
+
+# Bike Rentals: Holiday vs Non- Holidays Distribution
+ggplot(bike_df, aes(x = holiday, fill=holiday)) +
+  geom_bar(color="black") +
+  scale_fill_manual(values = c("No" ="orange", "Yes"="skyblue"))+
+  labs(title = "Bike Rentals: Holidays vs Non-Holidays", x = "Holiday", y = "Frequency") +
+  theme_minimal()+
+  theme(plot.title= element_text(hjust = 0.5, face="bold"),
+        axis.title.x = element_text(face='bold'),
+        axis.title.y = element_text(face='bold'))
+```
+
+<br></br>
+
+<p style="text-align: justify";>
+
+It makes sense that bike-rental stations produce lower rental volumes on holidays compared to regular working days. People are more likely to stay indoors, travel out of town, or rely on alternative transportation modes during holidays. Noticeably, operational factors also play a role, as some bike‑share systems reduce staffing and adjust service hours on holidays, which can limit bike availability and further suppress rentals. This pattern is also compounded by seasonal effects, as many holidays fall during colder months, naturally leading to discomfort and safety concerns for riders. Furthermore, holiday events, such as parades, marathons, or street closures, can disrupt normal riding routes and discourage bike use. Taken together, these factors explain why holidays represent fewer opportunities and reduce cycling demand overall. </p>
+
+
+<br></br>
+
+<br></br>
+
+### Which Day Type Results in Higher Rental Volume?
+```{r seasonal-trend2, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE}
+
+# Bike Rentals: Workingdays vs Non- Workingdays Distribution
+ggplot(bike_df, aes(x = workingday, fill=workingday)) +
+  geom_bar(color="black") +
+  scale_fill_manual(values = c("No" ="tomato", "Yes"="skyblue"))+
+  labs(title = "Bike Rentals Demand: Workingdays vs Non- Workingdays", x = "Working Day", y = "Frequency") +
+  theme_minimal()+
+  theme(plot.title= element_text(hjust = 0.5, face="bold"),
+        axis.title.x = element_text(face='bold'),
+        axis.title.y = element_text(face='bold'))
+```
+
+<br> </br>
+
+
+<p style="text-align: justify";> Studies analyzing bike‑sharing demand identify day type as a key predictor of usage patterns. In fact, bike‑rental datasets used in forecasting and regression analyses explicitly treat holiday status as a negative indicator of rental volume, while working‑day status is associated with higher demand. This reflects a broader and crucial trend in which biking usage is driven by necessity and daily mobility for commuting to work or school rather than being a leisure activity. On non‑working days, factors such as travel, reduced service hours, and the absence of routine commuting suppress overall cycling activity.
+ </p>
+
+
+<blockquote style="border-left: 6px solid red";padding-left: 16px;> <p style="text-align: justify"> 
+N.B: Although the holiday and working‑day plots appear similar, they capture different behavioral patterns. <strong> Holidays represent a small subset of non‑working days</strong> and are associated with travel, indoor activities, and reduced bike‑share operations, leading to the lowest rental volumes. Non‑working days, however, include weekends, which typically show higher leisure‑based cycling activity. As a result, non‑working days have higher rental counts than holidays, even though both categories fall below working‑day levels. Together, the two plots offer three complementary findings in bike‑rental behavior: highest on working days, moderate on weekends, and lowest on holidays. </p> 
+</blockquote>
+
+
+<br> </br>
+
+<br></br>
+
+
+### Comparing Weekdays and Weekends Bike Rental Volume
+```{r Weekdays vs weekend comparison, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE}
+
+# Creating another column to distinguish weekdays from weekends
+bike_df$day_type <- ifelse(bike_df$weekday %in% c("Saturday", "Sunday"), "Weekend", "Weekday")
+
+ggplot(bike_df, aes(x = day_type, fill=day_type)) +
+  geom_bar( color = "black") +
+  scale_fill_manual(values = c("Weekend"="lightblue", "Weekday"="green"))+
+  labs(title = "Weekday vs Weekend Comparison",x = "Day Type", y = "Frequency") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.title.x = element_text(face='bold'),
+        axis.title.y = element_text(face='bold'))
+```
+<br> </br>
+
+<p style="text-align: justify";>
+Weekdays occurred far more frequently than weekends between 2011 and 2012. This imbalance helps explain why weekday rental volumes tend to dominate, even when weather conditions are favorable. It sets the stage for the interaction plot by showing that differences in rental behavior reflect not only user preferences, but also the underlying distribution of day types. </p>
+
+
+<br></br>
+<br></br>
+
+### Interaction Between Day Type and Weather in Bike Rental Demand
+```{r weekdays vs weekends by weather, fig.width=9, fig.heiight=5, echo=FALSE, results='hide', warning=FALSE}
+
+weather_daytype_df <- bike_df %>%
+  group_by(day_type, weathersit) %>%
+  summarise(avg_count = mean(count), .groups = 'drop')
+
+ggplot(weather_daytype_df, aes(x = day_type, y = avg_count, fill = weathersit)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  labs(title = "Bike Rental Volume by Day Type and Weather Conditions", x = "Day Type", y = "Average Rentals",fill = "Weather") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.title.x = element_text(face='bold'),
+        axis.title.y = element_text(face='bold'))
+```
+<br> </br>
+
+<p style="text-align: justify";> 
+Bike rentals remain consistently low across both weekdays and weekends when the weather is cloudy or rainy, showing that poor weather suppresses demand regardless of day type. This aligns with prior analyses showing that precipitation and reduced visibility are strong "deterrents to cycling". Although clear weather boosts bike rental volumes overall, weekday usage still comes out slightly higher. This reflects the fact that many riders rely on the system for weekday commuting, while weekend demand softens as people shift toward other leisure activities that don’t involve biking.
+</p>
+
+<br></br>
+
+<br></br>
+
+### How Bike Rental Volume Varies by Season?
+
+```{r Season Trend, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE}
+
+# Create seasonal data by grouping by season
+season_df <- bike_df %>%
+  group_by(season) %>%
+  summarise(avg_count = mean(count))
+
+# Create summer_value object to annotate the spike 
+summer_value<- season_df %>% 
+  filter(season=="Summer") %>% 
+  pull(avg_count)
+
+# Create winter_value to annotate the lowest bike rental 
+winter_value<- season_df %>% 
+  filter(season=="Winter") %>% 
+  pull(avg_count)
+
+# Plot bike rentals trend by season
+ggplot(season_df, aes(x= season, y= avg_count, group=1)) +
+  geom_line(color="blue", size=1.5) +
+  annotate("point", x="Summer", y= summer_value, color="green", size=3) + 
+  annotate("text", x = "Summer", y= summer_value + 250, label="Summer Spike", color="black", fontface="bold") +
+  annotate("point", x="Winter", y= winter_value, color="red", size=3) + 
+  annotate("text", x = "Winter", y= winter_value +400, label="Low", color="tomato", fontface="bold") +
+  labs(title = "Average Bike Rental Demand Across Seasons ", x="Seasons", y="Average Rentals") +
+  theme_light() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.title.x = element_text(face='bold'),
+        axis.title.y = element_text(face='bold')
+        ) 
+```
+<br> </br>
+
+<p style="text-align: justify";> Bike rentals show strong seasonal variation, with usage rising steadily in summer months and dropping sharply during winter. This mirrors the earlier weather‑based patterns: clear, warm conditions consistently produce the highest rental volumes, while colder, wetter periods suppress activity. The “Summer Spike” annotation highlights the point in the two-year period when favorable weather aligns with increased outdoor mobility, producing peak demand. </p>
+
+<p style="text-align: justify";> In contrast, winter brings the lowest activity, reflecting the same deterrent effects seen in the weather trend: reduced temperatures associated with higher precipitation, produce less comfortable riding conditions. </p>
+
+<br></br>
+<br></br>
+<hr></hr>
+
+# Monthly Bike Rental Totals: Time Series Analysis
+
+<br></br>
+
+### a. Bike Rental Demand Over Time
+```{r Interactive Plot, fig.width= 9, fig.height=5, message=FALSE, echo=FALSE, warning=FALSE}
+
+# Data prep 
+bike_df$year_num  <- as.numeric(as.character(bike_df$year))
+bike_df$month_num <- as.numeric(bike_df$month)
+
+bike_df$date <- as.Date(
+  paste(bike_df$year_num, bike_df$month_num, "01", sep = "-"),
+  format = "%Y-%m-%d"
+)
+
+monthly_df <- bike_df %>% 
+  mutate(month_year = floor_date(date, "month")) %>% 
+  group_by(month_year) %>% 
+  summarise(tot_count = sum(count), .groups = "drop")
+
+ggplot(monthly_df, aes(x = month_year, y = tot_count)) +
+    geom_line(aes(color = "Monthly Trend"), linewidth = 0.9) +
+  
+  # Smooth LOESS trend
+  geom_smooth(
+    aes(color = "Smoothed Trend"),
+    method = "loess",
+    span = 0.4,
+    se = FALSE,
+    linewidth = 1.2
+  ) +
+  
+  scale_color_manual(
+    name = NULL,
+    values = c(
+      "Monthly Trend" = "black",
+      "Smoothed Trend" = "tomato"
+    )
+  ) +
+  
+  labs(
+    title = "Evolution of Monthly Bike Rental Volume",
+    x = "Month",
+    y = "Total Rentals"
+  ) +
+  
+  theme_light(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust=0.5),
+    axis.title.x = element_text(face = 'bold'),
+    axis.title.y = element_text(face='bold'),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+# Monthly series object
+bike_ts_monthly <- ts(monthly_df$tot_count, start = c(2011,1),frequency = 12)
+
+```
+
+<br> </br>
+
+<p style="text-align: justify";>
+Evidently, the strong seasonal pattern across both 2011 and 2012 is observed again. Rentals peak during the summer months, particularly around June to August, and experience a sharp decline during the winter, especially in January and February of each year. This confirms that seasonality is a dominant driver of bike rental demand.
+</p>
+
+<p style="text-align: justify";>
+This trend matches what the ResearchGate study found: “cycling peaks in summer and drops in winter”. The MDPI study also confirms that weather, especially temperature and rain, strongly affects bike usage. As supported by strong evidence‑based studies, the data confirms a consistent seasonal phenomenon: bike rentals rise in summer when weather conditions are favorable and decline in winter when cold, wet conditions discourage riding.
+</p> 
+
+<br></br>
+<br></br>
+
+
+### b. Trend, Seasonality, and Randomness
+
+```{r Decomposition, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE}
+
+# Decomposing time series
+decomp <- decompose(bike_ts_monthly)
+plot(decomp, col= c("blue"),lwd=1.9)
+grid()
+```
+<br></br>
+<br></br>
+
+### c. Bike Rental Demand: Forecast Results
+
+```{r ARIMA, fig.width=9, fig.height=5, echo=FALSE, warning=FALSE}
+
+# ARIMA  model
+bike_ts_arima<- auto.arima(bike_ts_monthly)
+
+# Forecasting bike rentals for 10 month
+forecast_vals <- forecast(bike_ts_arima, h = 10)
+
+# Plot forecast
+autoplot(forecast_vals) +
+scale_y_continuous(labels = scales::comma, limits = c(0, NA)) +
+theme_classic() +
+labs(title = "Bike Rentals: 10-Month Forecast", x = "Year", y = "Rentals") +
+theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.title.x = element_text(face='bold'),
+      axis.title.y = element_text(face='bold')) 
+```
+
+```{r residual dignostics, echo=FALSE, warning=FALSE, results='hide'}
+# ACF/PACF of residuals
+#acf(residuals(bike_ts_arima))
+#pacf(residuals(bike_ts_arima))
+
+# Checking for autocorrelation
+#checkresiduals(bike_ts_arima)
+
+```
+
+```{r model diagnostics, echo= FALSE, message=FALSE, results='hide',warning=FALSE}
+# Check if residuals are normally distributed (Shapiro test)
+shapiro.test(residuals(bike_ts_arima))
+
+# Chech for stationarity of residuals (important for ARIMA validity)
+kpss.test(residuals(bike_ts_arima))
+
+# Evaluate model performance
+accuracy(bike_ts_arima)
+```
+<br></br>
+<br></br>
+
+### e.  Model Performance Results
+
+<style>
+  table.arima-summary {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 14px;
+  }
+  table.arima-summary th, table.arima-summary td {
+    border: 2px solid white;
+    padding: 6px 8px;
+    text-align: center;
+  }
+  table.arima-summary th {
+    background-color: black;
+    font-weight: bold;
+  }
+  table.arima-summary caption {
+    caption-side: top;
+    font-weight: bold;
+    text-align: left;
+    margin-bottom: 4px;
+  }
+</style>
+
+<table class="arima-summary">
+  <caption style="color:white";> ARIMA(1,1,0) model diagnostics and forecast accuracy</caption>
+  <tr>
+    <th colspan="4">Model specification</th>
+  </tr>
+  <tr>
+    <th>Model</th>
+    <th>AR(1)</th>
+    <th>sigma-square</th>
+    <th>Log-likelihood</th>
+  </tr>
+  <tr>
+    <td>ARIMA(1,1,0)</td>
+    <td>0.5383</td>
+    <td>382,385,344</td>
+    <td>-259.56</td>
+  </tr>
+
+  <tr>
+    <th colspan="4">Residual diagnostics</th>
+  </tr>
+  <tr>
+    <th>Test</th>
+    <th>Statistic</th>
+    <th>df / W</th>
+    <th>p-value</th>
+  </tr>
+  <tr>
+    <td>Ljung–Box (Q*)</td>
+    <td>2.9228</td>
+    <td>df = 4</td>
+    <td>0.5708</td>
+  </tr>
+  <tr>
+    <td>Shapiro–Wilk</td>
+    <td>W = 0.93563</td>
+    <td>–</td>
+    <td>0.1303</td>
+  </tr>
+  <tr>
+    <td>KPSS (level)</td>
+    <td>0.19327</td>
+    <td>lag = 2</td>
+    <td>0.10</td>
+  </tr>
+
+</table>
+
+<br></br>
+
+<p style="text-align: justify";> 
+The ARIMA(1,1,0) model provides a statistically sound and well‑specified fit for the monthly bike rental series. The autoregressive coefficient is positive and meaningful (ar1 = 0.54), indicating moderate persistence in month‑to‑month changes. Diagnostic tests confirm that the residuals behave appropriately for forecasting: the Ljung–Box test shows no evidence of autocorrelation (p = 0.57), and the Shapiro–Wilk test indicates approximate normality (p = 0.13). </p>
+
+<p style="text-align:justify";>
+Forecast‑error metrics reinforce this stability. The first‑lag residual autocorrelation (ACF1) is close to zero, suggesting no remaining structure left unexplained by the model. In terms of accuracy, the model performs better than a naïve benchmark (MASE < 1) and achieves a MAPE below 15%, which is generally considered acceptable to good for real‑world forecasting. Taken together, these results show that the ARIMA(1,1,0) model captures the underlying dynamics of monthly bike rentals effectively and produces reliable, reasonably accurate predictions. </p>
+
+**Key strengths of the model include:**
+
+* No significant autocorrelation in residuals (Ljung–Box p > 0.05)
+
+* Residuals approximately normal (Shapiro–Wilk p > 0.05)
+
+* ACF1 near zero, indicating well‑behaved forecast errors
+
+* MASE < 1, outperforming a naïve baseline
+
+* MAPE < 15%, reflecting practical forecasting accuracy
+
+<br></br>
+<br></br>
+
+
+### Forecast Accuracy: Actual vs Predicted
+```{r Actual vs Predicted, fig.width=9,fig.height=5, echo=FALSE, warning=FALSE}
+# Generate predictions
+predicted <- fitted(bike_ts_arima)
+
+# Plot actual vs predicted 
+#zoo package interpret x axis as date format, instead of numeric 
+bike_zoo <- zoo(monthly_df$tot_count, order.by = monthly_df$month_year)
+plot(bike_zoo, type = "l", col = "black", lwd = 2,
+     main = "Actual vs Predicted Values",
+     xlab = "Time", ylab = "Bike Rentals")
+lines(zoo(predicted, order.by = monthly_df$month_year), col = "blue", lwd = 2)
+legend("topleft", legend = c("Actual", "Predicted"),
+       col = c("black", "blue"), lwd = 2)
+```
+<br></br>
+
+<p style="text-align: justify";> The blue predicted line closely tracks the black actual line across all months from January 2011 to July 2012. This suggests the model has strong predictive power, effectively capturing demand fluctuations and the key seasonal patterns that drive biking behavior, including summer peaks and winter declines. There are no large persistent errors between the two lines, which implies the model avoids over-fitting or under-fitting and, demonstrably, the model is reliable for short-term forecasting and can be used to plan resource allocation and anticipate future demand.</p>
+
+<br></br>
+
+<hr style="border-top:2px groove white;"> </hr>
+
+## **Key Findings & Implications**
+
+<p style="text-align: justify";>
+The ARIMA 10-month forecast indicates that bike‑rental demand is settling into a stable range of roughly 75,000–80,000 monthly rentals after a sharp decline from the 2012 peak, suggesting a predictable long‑term equilibrium that supports more confident planning. With demand expected to flatten over the next several months, the bike-rental company can avoid over‑provisioning during slower periods, shift surplus bikes toward higher‑demand stations, and introduce targeted promotions when usage is projected to dip. </p>
+
+<p style="text-align: justify";>
+The forecast also highlights the value of integrating predictive analytics into operational decisions, however, the model’s relatively high RMSE and MAE, the absence of key external factors such as local events or economic indicators, and the short 24‑month dataset all limit its predictive strength, highlighting the need for richer data and more robust modeling in future work. </p>
+
+
+<br></br>
+<br></br>
+<br></br>
+<br></br>
+<br></br>
+
+
+
+### References
+<li style="color:white;"> <a href="https://www.researchgate.net/publication/353875007_How_does_weather_affect_bikeshare_use_A_comparative_analysis_of_forty_cities_across_climate_zones
+" style=" color:white;"> How Does Weather Affect Bikeshare Use? </a>
+</li>
+
+<li style="color:white;"> <a href="https://www.mdpi.com/2076-3417/15/17/9834
+" style=" color:white;"> The Impact of Weather on Shared Bikes </a>
+</li>
+
+<li style="color:white;"> <a href="https://jonathanpufall.com/assets/documents/phillycycle_case_report.pdf" style=" color:white;"> "Weather" to Rent a Bike </a>
+</li>
+
+<br></br>
+
+<br></br>
+
+
+<a href="https://archive.ics.uci.edu/ml/datasets/bike+sharing+dataset" target= "_blank" style=" color:#FC0FC0;" > <strong> Click For Data Source</strong> 
+
+</a>
+
