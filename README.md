@@ -3,6 +3,11 @@
 This project analyzes how weather conditions, holidays, and seasonal patterns influence bike‑rental demand using an R‑based workflow. The analysis includes data cleaning, exploratory visualization, seasonal decomposition, and ARIMA forecasting, with results shared through an HTML report.
 
 ---
+## 📥 HTML Report
+The complete analysis, including visualizations, seasonal decomposition, and ARIMA forecasting, is available as an HTML report on RPubs:
+
+**RPubs:** https://rpubs.com/carlpub123/1334127
+--- 
 
 ## Project Overview
 - Cleaned and transformed bike‑rental and weather datasets, including reversing encoded categorical features back to their original observational names
